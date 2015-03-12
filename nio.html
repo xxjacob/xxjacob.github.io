@@ -1,0 +1,191 @@
+//---------------------- sigle client
+public static void main(String[] args) throws IOException {
+
+        ServerSocket ss = new ServerSocket();
+        ss.bind(new InetSocketAddress("127.0.0.1", 10000));
+        //
+        Socket s = ss.accept();
+        InputStream is = s.getInputStream();
+        int b;
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        //
+        while ((b = is.read()) > 0) {
+            bos.write(b);
+            if (b == '\n') {
+                //
+                s.getOutputStream().write(bos.toByteArray());
+                bos.reset();
+            }
+        }
+
+        /**
+         * 简单 易使用，符合编程思维。
+         *
+         * 必须要和多线程结合。
+         */
+    }
+
+
+
+
+//------------------bio multi-client with threads
+/**
+ *
+ * 缺点: 处理大量连接时表现很差。 而http server 或者 需要承受大量访问的服务。都会面临高并发。
+ * 1.内存 = -Xss * (threads count)
+ * 2.cpu = context switch
+ *
+ * 另外: 注意ulimit限制
+ */
+public static void main(String[] args) throws IOException {
+
+        ServerSocket ss = new ServerSocket();
+        ss.bind(new InetSocketAddress("127.0.0.1", 10000));
+
+        ExecutorService executorService = Executors.newCachedThreadPool();
+
+        //
+        while (true) {
+            final Socket s = ss.accept();
+
+            executorService.execute(new Runnable() {
+
+                @Override
+                public void run() {
+                    try {
+                        InputStream is = s.getInputStream();
+                        int b;
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        //
+                        while ((b = is.read()) > 0) {
+                            bos.write(b);
+                            if (b == '\n') {
+                                //
+                                s.getOutputStream().write(bos.toByteArray());
+                                bos.reset();
+                            }
+                        }
+                    } catch (Exception e) {
+
+                    }
+                }
+            });
+
+        }
+    }
+
+
+
+
+//------------------ nio with single thread
+/**
+ * 非阻塞，为充分利用cpu，提供了好的模式。
+ * 避免thread per connection 模式带来的上述问题。
+ */
+public static void main(String[] args) throws IOException {
+
+        /**
+         * Selector是什么？
+         *  一个管家：
+         *
+         * 管理了很多的SelectableChannel。（ServerSocketChannel SocketChannel）
+         * 这些channel都有很多操作，很可能没法立刻完成。如 accept read write connect。
+         *
+         * 非阻塞的解决办法：channel先告诉Selector 我想要做什么io操作。
+         * register(Selector sel, int ops)
+         *
+         * SelectionKey.OP_ACCEPT
+         * SelectionKey.OP_READ
+         * SelectionKey.OP_WRITE
+         * SelectionKey.OP_CONNECT
+         *
+         * 当这个io操作可用被立刻完成的时候，selector被通知到。
+         */
+        Selector selector = Selector.open();
+
+
+        ServerSocketChannel ssc = ServerSocketChannel.open();
+        /**
+         * accept read write connect 立刻返回结果， 没有的话返回null 或者 0
+         */
+        ssc.configureBlocking(false);
+        ssc.bind(new InetSocketAddress(10000));
+        ssc.register(selector, SelectionKey.OP_ACCEPT);
+
+        ByteBuffer buffer = ByteBuffer.allocate(128);
+
+        /**
+         * 没有可用的事件时一直阻塞
+         * 当一个或者多个io操作可用被立刻完成的时候，返回。s
+         */
+        while (selector.select() > 0) {
+            /**
+             * selectionKey唯一标识 一个SelectableChannel注册再一个Selector下
+             */
+            Set<SelectionKey> readyKeys = selector.selectedKeys();
+            Iterator iterator = readyKeys.iterator();
+            while (iterator.hasNext()) {
+                SelectionKey key = (SelectionKey) iterator.next();
+                iterator.remove();
+                if (key.isAcceptable()) {
+                    ServerSocketChannel channel = (ServerSocketChannel) key.channel();
+                    /**
+                     * 建立了一个socket链接，这个链接的读写操作也需要进行nio管理
+                     */
+                    SocketChannel socketChannel = channel.accept();
+                    socketChannel.configureBlocking(false);
+                    if (socketChannel != null) {
+
+                        SelectionKey sk = socketChannel.register(selector, SelectionKey.OP_READ);
+                        /**
+                         * attachment: 与业务的结合点。
+                         * 这里的attachment存的是 客户端输入内容
+                         */
+                        sk.attach(ByteBuffer.allocate(128));
+
+                    }
+                }
+
+                if (key.isReadable()) {
+                    SocketChannel channel = (SocketChannel) key.channel();
+                    ByteBuffer attachment = (ByteBuffer) key.attachment();
+                    int len, total = 0;
+                    while ((len = channel.read(buffer)) > 0) {
+                        total += len;
+                    }
+
+                    if (total > 0) {
+                        buffer.flip();
+                        while (buffer.hasRemaining()) {
+                            byte s = buffer.get();
+                            System.out.println((char) s);
+                            attachment.put(s);
+                            /**
+                             * 读到了一行，可用写了
+                             */
+                            if (s == '\n') {
+                                attachment.flip();
+                                key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+                            }
+                        }
+                        buffer.clear();
+                    }
+                }
+
+                if (key.isWritable()) {
+                    SocketChannel channel = (SocketChannel) key.channel();
+                    ByteBuffer attachment = (ByteBuffer) key.attachment();
+
+                    while (channel.write(attachment) > 0) {
+                    }
+
+                    if (!attachment.hasRemaining()) {
+                        key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
+                        attachment = ByteBuffer.allocate(128);
+                        key.attach(attachment);
+                    }
+                }
+            }
+        }
+    }
+
